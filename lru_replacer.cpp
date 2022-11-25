@@ -9,8 +9,8 @@ namespace scudb {
 template <typename T> LRUReplacer<T>::LRUReplacer() {
   head = make_shared<Node>();
   tail = make_shared<Node>();
-  head->next = tail;
   tail->prev = head;
+  head->next = tail;
 }
 
 template <typename T> LRUReplacer<T>::~LRUReplacer() {}
@@ -22,22 +22,22 @@ template <typename T> void LRUReplacer<T>::Insert(const T &value) {
   lock_guard<mutex> lck(latch);
   shared_ptr<Node> cur;
   if (map.find(value) != map.end()) {
-    //若队列中存在value,则将之在队列中去除
+    //若队列中存在value,则先将之在队列中去除
     cur = map[value];
     shared_ptr<Node> prev = cur->prev;
     shared_ptr<Node> succ = cur->next;
-    prev->next = succ;
     succ->prev = prev;
+    prev->next = succ;
   } else {
     // 若队列中不存在value,则创建一个键为value的新结点
     cur = make_shared<Node>(value);
   }
   //将cur添加至队首
-  shared_ptr<Node> fir = head->next;
-  cur->next = fir;
-  fir->prev = cur;
-  cur->prev = head;
+  shared_ptr<Node> temp = head->next;
+  cur->next = temp;
+  temp->prev = cur;
   head->next = cur;
+  cur->prev = head;
   map[value] = cur;
   return;
 }
@@ -47,12 +47,12 @@ template <typename T> void LRUReplacer<T>::Insert(const T &value) {
  */
 template <typename T> bool LRUReplacer<T>::Victim(T &value) {
   lock_guard<mutex> lck(latch);
-  if (map.empty()) {
+  if (map.empty())
     return false;
-  }
   shared_ptr<Node> last = tail->prev;
-  tail->prev = last->prev;
-  last->prev->next = tail;
+  shared_ptr<Node> temp = last->prev;
+  temp->next = tail;
+  tail->prev = temp;
   //在队列中删除最后一个节点并在value中储存其val
   value = last->val;
   map.erase(last->val);

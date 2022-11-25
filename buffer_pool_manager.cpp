@@ -47,34 +47,40 @@ BufferPoolManager::~BufferPoolManager() {
  */
 Page* BufferPoolManager::FetchPage(page_id_t page_id) {
     lock_guard<mutex> lck(latch_);
-    Page* tar = nullptr;
-    if (page_table_->Find(page_id, tar)) {  // 1.1
-        tar->pin_count_++;
-        //将此页面从代替换队列中删除
-        replacer_->Erase(tar);
-        return tar;
+    Page* target = nullptr;
+    // 1.1
+    //若内存中存在该页面
+    if (page_table_->Find(page_id, target)) {
+        target->pin_count_++;
+        //将此页面从待替换队列中删除
+        replacer_->Erase(target);
+        return target;
     }
     // 1.2
-    tar = GetVictimPage();
-    if (tar == nullptr) return tar;
+    //内存中未找到该页面 需寻找一个内存页面调入外存中所需页面
+    // taget此时为待换出页面指针
+    target = GetVictimPage();
+    // 若没有页面可换出
+    if (target == nullptr)
+        return nullptr;
     // 2
     //若待换出页面被修改过，则要将其写回外存
-    if (tar->is_dirty_) {
-        disk_manager_->WritePage(tar->GetPageId(), tar->data_);
-    }
+    if (target->is_dirty_)
+        disk_manager_->WritePage(target->GetPageId(), target->data_);
     // 3
-    page_table_->Remove(tar->GetPageId());
-    // 将此页面放到队首
-    page_table_->Insert(page_id, tar);
-    // 4
-    //读入新页面
-    disk_manager_->ReadPage(page_id, tar->data_);
-    //将新页面pin置1，修改位为false
-    tar->pin_count_ = 1;
-    tar->is_dirty_ = false;
-    tar->page_id_ = page_id;
+    //在pagetable中删去待删除页面
+    page_table_->Remove(target->GetPageId());
 
-    return tar;
+    //读入新页面
+    disk_manager_->ReadPage(page_id, target->data_);
+    // 加入新页面
+    page_table_->Insert(page_id, target);
+    //将新页面pin置1，修改位为false
+    target->pin_count_ = 1;
+    target->is_dirty_ = false;
+    target->page_id_ = page_id;
+
+    return target;
 }
 // Page *BufferPoolManager::find
 
@@ -86,19 +92,14 @@ Page* BufferPoolManager::FetchPage(page_id_t page_id) {
  */
 bool BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty) {
     lock_guard<mutex> lck(latch_);
-    Page* tar = nullptr;
-    page_table_->Find(page_id, tar);
-    if (tar == nullptr) {
+    Page* target = nullptr;
+    page_table_->Find(page_id, target);
+    if (target == nullptr || target->GetPinCount() <= 0)
         return false;
-    }
-    tar->is_dirty_ = is_dirty;
-    if (tar->GetPinCount() <= 0) {
-        return false;
-    };
-    //pin_count减一后如果等于零，将其插入代替换队列
-    if (--tar->pin_count_ == 0) {
-        replacer_->Insert(tar);
-    }
+    // pin_count减一后如果等于零，将其插入代替换队列
+    if (--target->pin_count_ == 0)
+        replacer_->Insert(target);
+    target->is_dirty_ = is_dirty;
     return true;
 }
 
@@ -111,16 +112,15 @@ bool BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty) {
 //将页面写回外存
 bool BufferPoolManager::FlushPage(page_id_t page_id) {
     lock_guard<mutex> lck(latch_);
-    Page* tar = nullptr;
-    page_table_->Find(page_id, tar);
+    Page* target = nullptr;
+    page_table_->Find(page_id, target);
     //确保非空指针且pageid有效
-    if (tar == nullptr || tar->page_id_ == INVALID_PAGE_ID) {
+    if (target == nullptr || target->page_id_ == INVALID_PAGE_ID)
         return false;
-    }
     //若dirty位true,则写回外存并将其置为false
-    if (tar->is_dirty_) {
-        disk_manager_->WritePage(page_id, tar->GetData());
-        tar->is_dirty_ = false;
+    if (target->is_dirty_) {
+        disk_manager_->WritePage(page_id, target->GetData());
+        target->is_dirty_ = false;
     }
 
     return true;
@@ -136,22 +136,21 @@ bool BufferPoolManager::FlushPage(page_id_t page_id) {
  */
 bool BufferPoolManager::DeletePage(page_id_t page_id) {
     lock_guard<mutex> lck(latch_);
-    Page* tar = nullptr;
-    page_table_->Find(page_id, tar);
-    if (tar != nullptr) {
+    Page* target = nullptr;
+    page_table_->Find(page_id, target);
+    if (target != nullptr) {
         // 若pin大于零表示仍有进程在使用此页面，不可删除
-        if (tar->GetPinCount() > 0) {
+        if (target->GetPinCount() > 0)
             return false;
-        }
         //将此页从代替换页面中删除
-        replacer_->Erase(tar);
+        replacer_->Erase(target);
         //将此页面从pagetable中删除
         page_table_->Remove(page_id);
-        tar->is_dirty_ = false;
+        target->is_dirty_ = false;
         //将此页面数据清空
-        tar->ResetMemory();
+        target->ResetMemory();
         //将此页面加入freelist中
-        free_list_->push_back(tar);
+        free_list_->push_back(target);
     }
     disk_manager_->DeallocatePage(page_id);
     return true;
@@ -167,48 +166,44 @@ bool BufferPoolManager::DeletePage(page_id_t page_id) {
  */
 Page* BufferPoolManager::NewPage(page_id_t& page_id) {
     lock_guard<mutex> lck(latch_);
-    Page* tar = nullptr;
-    tar = GetVictimPage();
-    if (tar == nullptr) return tar;
-
-    page_id = disk_manager_->AllocatePage();
+    Page* target = nullptr;
+    //在内存中创建一个新页面需要一个位置 因此使用target指向待换出页面
+    target = GetVictimPage();
+    if (target == nullptr)
+        return target;
     // 2
     //若页面被修改过则写回外存
-    if (tar->is_dirty_) {
-        disk_manager_->WritePage(tar->GetPageId(), tar->data_);
-    }
+    if (target->is_dirty_)
+        disk_manager_->WritePage(target->GetPageId(), target->data_);
     // 3
     //删去旧页面，将新页面插入pagetable
-    page_table_->Remove(tar->GetPageId());
-    page_table_->Insert(page_id, tar);
+    page_table_->Remove(target->GetPageId());
+    page_id = disk_manager_->AllocatePage();
+    page_table_->Insert(page_id, target);
 
     // 4
-    tar->page_id_ = page_id;
+    target->page_id_ = page_id;
     //将此页面数据清空
-    tar->ResetMemory();
-    tar->is_dirty_ = false;
-    tar->pin_count_ = 1;
+    target->ResetMemory();
+    target->is_dirty_ = false;
+    target->pin_count_ = 1;
 
-    return tar;
+    return target;
 }
 
 //寻找要被换出的页面
 Page* BufferPoolManager::GetVictimPage() {
-    Page* tar = nullptr;
+    Page* target = nullptr;
     //先在freelist中寻找，再在replace中寻找
-    if (free_list_->empty()) {
-        if (replacer_->Size() == 0) {
-            return nullptr;
-        }
-        replacer_->Victim(tar);
-    } else {
-        //freelist队首元素作为target
-        tar = free_list_->front();
+    if (!free_list_->empty()) {
+        // freelist队首元素作为target
+        target = free_list_->front();
         free_list_->pop_front();
-        assert(tar->GetPageId() == INVALID_PAGE_ID);
-    }
-    assert(tar->GetPinCount() == 0);
-    return tar;
+    } else if (replacer_->Size() == 0)
+        return nullptr;  // freelist与replacer都为空 返回空指针表示没有待换出页面
+    else
+        replacer_->Victim(target);
+    return target;
 }
 
 }  // namespace scudb
