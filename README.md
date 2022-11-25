@@ -1,5 +1,5 @@
 # scudb_initial
-# 更改的部分代码
+# 部分代码
 ## extendible_hash.cpp insert
 ![image](results/code1.png)
 ## lru_replacer.cpp victim
